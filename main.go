@@ -29,6 +29,10 @@ func main() {
 	s.AddTool(clockify.GetCurrentTimerTool(), tools.HandleGetCurrentTimer)
 	s.AddTool(clockify.StartTimerTool(), tools.HandleStartTimer)
 	s.AddTool(clockify.StopTimerTool(), tools.HandleStopTimer)
+	s.AddTool(clockify.CreateTimeEntryTool(), tools.HandleCreateTimeEntry)
+	s.AddTool(clockify.DeleteTimeEntryTool(), tools.HandleDeleteTimeEntry)
+	s.AddTool(clockify.GetDailySummaryTool(), tools.HandleGetDailySummary)
+	s.AddTool(clockify.GetWeeklySummaryTool(), tools.HandleGetWeeklySummary)
 
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("Server error: %v", err)

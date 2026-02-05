@@ -3,6 +3,8 @@ package clockify
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -354,4 +356,422 @@ func (t *Tools) HandleStopTimer(ctx context.Context, request mcp.CallToolRequest
 	result += fmt.Sprintf("Billable: %t\n", entry.Billable)
 
 	return mcp.NewToolResultText(result), nil
+}
+
+// CreateTimeEntryTool returns the MCP tool definition for create_time_entry.
+func CreateTimeEntryTool() mcp.Tool {
+	return mcp.NewTool(
+		"create_time_entry",
+		mcp.WithDescription("Create a completed time entry with both start and end times. Use this to log past work."),
+		mcp.WithString("start",
+			mcp.Required(),
+			mcp.Description("Start time in ISO 8601 format (e.g., 2024-01-15T09:00:00Z)"),
+		),
+		mcp.WithString("end",
+			mcp.Required(),
+			mcp.Description("End time in ISO 8601 format (e.g., 2024-01-15T17:00:00Z)"),
+		),
+		mcp.WithString("description",
+			mcp.Description("Description of what was worked on"),
+		),
+		mcp.WithString("project_id",
+			mcp.Description("Project ID to associate with the entry"),
+		),
+		mcp.WithBoolean("billable",
+			mcp.Description("Whether the entry is billable"),
+		),
+	)
+}
+
+// HandleCreateTimeEntry handles the create_time_entry tool call.
+func (t *Tools) HandleCreateTimeEntry(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	start := mcp.ParseString(request, "start", "")
+	end := mcp.ParseString(request, "end", "")
+	description := mcp.ParseString(request, "description", "")
+	projectID := mcp.ParseString(request, "project_id", "")
+	billable := mcp.ParseBoolean(request, "billable", false)
+
+	// Validate required parameters
+	if start == "" {
+		return mcp.NewToolResultError("start parameter is required"), nil
+	}
+	if end == "" {
+		return mcp.NewToolResultError("end parameter is required"), nil
+	}
+
+	// Validate start < end
+	startTime, err := time.Parse(time.RFC3339, start)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid start time format: %v", err)), nil
+	}
+	endTime, err := time.Parse(time.RFC3339, end)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Invalid end time format: %v", err)), nil
+	}
+	if !startTime.Before(endTime) {
+		return mcp.NewToolResultError("Start time must be before end time"), nil
+	}
+
+	// Get current user to get default workspace
+	user, err := t.client.GetCurrentUser(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get current user: %v", err)), nil
+	}
+
+	// Build the request
+	req := CreateTimeEntryRequest{
+		Start:       start,
+		End:         end,
+		Description: description,
+		ProjectID:   projectID,
+		Billable:    billable,
+	}
+
+	entry, err := t.client.CreateTimeEntry(ctx, user.DefaultWorkspace, req)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to create time entry: %v", err)), nil
+	}
+
+	result := fmt.Sprintf("Time entry created:\n")
+	result += fmt.Sprintf("ID: %s\n", entry.ID)
+	if entry.Description != "" {
+		result += fmt.Sprintf("Description: %s\n", entry.Description)
+	}
+	result += fmt.Sprintf("Started: %s\n", entry.TimeInterval.Start)
+	result += fmt.Sprintf("Ended: %s\n", entry.TimeInterval.End)
+	if entry.TimeInterval.Duration != "" {
+		result += fmt.Sprintf("Duration: %s\n", entry.TimeInterval.Duration)
+	}
+	if entry.ProjectID != "" {
+		result += fmt.Sprintf("Project ID: %s\n", entry.ProjectID)
+	}
+	result += fmt.Sprintf("Billable: %t\n", entry.Billable)
+
+	return mcp.NewToolResultText(result), nil
+}
+
+// DeleteTimeEntryTool returns the MCP tool definition for delete_time_entry.
+func DeleteTimeEntryTool() mcp.Tool {
+	return mcp.NewTool(
+		"delete_time_entry",
+		mcp.WithDescription("Delete a time entry by ID"),
+		mcp.WithString("entry_id",
+			mcp.Required(),
+			mcp.Description("The ID of the time entry to delete"),
+		),
+	)
+}
+
+// HandleDeleteTimeEntry handles the delete_time_entry tool call.
+func (t *Tools) HandleDeleteTimeEntry(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	entryID := mcp.ParseString(request, "entry_id", "")
+
+	// Validate required parameter
+	if entryID == "" {
+		return mcp.NewToolResultError("entry_id parameter is required"), nil
+	}
+
+	// Get current user to get default workspace
+	user, err := t.client.GetCurrentUser(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get current user: %v", err)), nil
+	}
+
+	// Delete the time entry
+	err = t.client.DeleteTimeEntry(ctx, user.DefaultWorkspace, entryID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to delete time entry: %v", err)), nil
+	}
+
+	result := fmt.Sprintf("Time entry deleted successfully (ID: %s)", entryID)
+	return mcp.NewToolResultText(result), nil
+}
+
+// GetDailySummaryTool returns the MCP tool definition for get_daily_summary.
+func GetDailySummaryTool() mcp.Tool {
+	return mcp.NewTool(
+		"get_daily_summary",
+		mcp.WithDescription("Get a daily summary of time tracked by project for a specific date. Returns total time and breakdown by project with percentages."),
+		mcp.WithString("date",
+			mcp.Description("Date in ISO 8601 format (YYYY-MM-DD, e.g., 2024-01-15). Defaults to today"),
+		),
+	)
+}
+
+// HandleGetDailySummary handles the get_daily_summary tool call.
+func (t *Tools) HandleGetDailySummary(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	dateStr := mcp.ParseString(request, "date", "")
+
+	// Parse date or default to today
+	var targetDate time.Time
+	if dateStr == "" {
+		targetDate = time.Now().UTC()
+	} else {
+		parsed, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid date format. Use YYYY-MM-DD: %v", err)), nil
+		}
+		targetDate = parsed.UTC()
+	}
+
+	// Calculate start (00:00:00) and end (23:59:59) of the day
+	startOfDay := time.Date(targetDate.Year(), targetDate.Month(), targetDate.Day(), 0, 0, 0, 0, time.UTC)
+	endOfDay := time.Date(targetDate.Year(), targetDate.Month(), targetDate.Day(), 23, 59, 59, 999999999, time.UTC)
+
+	// Get current user
+	user, err := t.client.GetCurrentUser(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get current user: %v", err)), nil
+	}
+
+	// Fetch time entries for the day
+	params := TimeEntriesParams{
+		Start: startOfDay.Format(time.RFC3339),
+		End:   endOfDay.Format(time.RFC3339),
+	}
+
+	entries, err := t.client.GetTimeEntries(ctx, user.DefaultWorkspace, user.ID, params)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get time entries: %v", err)), nil
+	}
+
+	if len(entries) == 0 {
+		dateDisplay := targetDate.Format("2006-01-02")
+		return mcp.NewToolResultText(fmt.Sprintf("Daily Summary for %s:\n\nNo time entries found", dateDisplay)), nil
+	}
+
+	// Aggregate by project
+	projectDurations := make(map[string]time.Duration)
+	projectNames := make(map[string]string) // projectID -> projectName
+	var totalDuration time.Duration
+
+	// Get all projects to map IDs to names
+	projects, err := t.client.GetProjects(ctx, user.DefaultWorkspace)
+	if err == nil {
+		for _, p := range projects {
+			projectNames[p.ID] = p.Name
+		}
+	}
+
+	for _, entry := range entries {
+		duration := parseDuration(entry.TimeInterval.Duration)
+		totalDuration += duration
+
+		projectKey := entry.ProjectID
+		if projectKey == "" {
+			projectKey = "(no project)"
+		}
+		projectDurations[projectKey] += duration
+	}
+
+	// Format output
+	dateDisplay := targetDate.Format("2006-01-02")
+	result := fmt.Sprintf("Daily Summary for %s:\n\n", dateDisplay)
+	result += fmt.Sprintf("Total: %s\n\n", formatDuration(totalDuration))
+
+	if len(projectDurations) > 0 {
+		result += "By Project:\n"
+		for projectID, duration := range projectDurations {
+			projectName := projectNames[projectID]
+			if projectName == "" {
+				projectName = projectID
+			}
+
+			percentage := 0.0
+			if totalDuration > 0 {
+				percentage = (float64(duration) / float64(totalDuration)) * 100
+			}
+
+			result += fmt.Sprintf("- %s: %s (%.1f%%)\n", projectName, formatDuration(duration), percentage)
+		}
+	}
+
+	return mcp.NewToolResultText(result), nil
+}
+
+// GetWeeklySummaryTool returns the MCP tool definition for get_weekly_summary.
+func GetWeeklySummaryTool() mcp.Tool {
+	return mcp.NewTool(
+		"get_weekly_summary",
+		mcp.WithDescription("Get a weekly summary of time tracked by project. Returns total time, breakdown by project with percentages, and daily breakdown. Week runs Monday-Sunday."),
+		mcp.WithString("week_offset",
+			mcp.Description("Week offset from current week. 0 = current week, -1 = last week, -2 = two weeks ago, etc. Defaults to 0"),
+		),
+	)
+}
+
+// HandleGetWeeklySummary handles the get_weekly_summary tool call.
+func (t *Tools) HandleGetWeeklySummary(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	weekOffsetStr := mcp.ParseString(request, "week_offset", "0")
+	weekOffset, err := strconv.Atoi(weekOffsetStr)
+	if err != nil {
+		weekOffset = 0
+	}
+
+	// Calculate week bounds (Monday 00:00:00 to Sunday 23:59:59)
+	weekStart, weekEnd := getWeekBounds(weekOffset)
+
+	// Get current user
+	user, err := t.client.GetCurrentUser(ctx)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get current user: %v", err)), nil
+	}
+
+	// Fetch time entries for the week
+	params := TimeEntriesParams{
+		Start: weekStart.Format(time.RFC3339),
+		End:   weekEnd.Format(time.RFC3339),
+	}
+
+	entries, err := t.client.GetTimeEntries(ctx, user.DefaultWorkspace, user.ID, params)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get time entries: %v", err)), nil
+	}
+
+	// Get all projects to map IDs to names
+	projects, err := t.client.GetProjects(ctx, user.DefaultWorkspace)
+	projectNames := make(map[string]string)
+	if err == nil {
+		for _, p := range projects {
+			projectNames[p.ID] = p.Name
+		}
+	}
+
+	if len(entries) == 0 {
+		weekDisplay := fmt.Sprintf("%s - %s", weekStart.Format("Jan 02"), weekEnd.Format("Jan 02, 2006"))
+		return mcp.NewToolResultText(fmt.Sprintf("Weekly Summary (%s):\n\nNo time entries found", weekDisplay)), nil
+	}
+
+	// Aggregate by project and by day
+	projectDurations := make(map[string]time.Duration)
+	dailyDurations := make(map[string]time.Duration) // day name -> duration
+	var totalDuration time.Duration
+
+	for _, entry := range entries {
+		duration := parseDuration(entry.TimeInterval.Duration)
+		totalDuration += duration
+
+		// Aggregate by project
+		projectKey := entry.ProjectID
+		if projectKey == "" {
+			projectKey = "(no project)"
+		}
+		projectDurations[projectKey] += duration
+
+		// Aggregate by day
+		startTime, err := time.Parse(time.RFC3339, entry.TimeInterval.Start)
+		if err == nil {
+			dayName := startTime.Weekday().String()[:3] // Mon, Tue, etc.
+			dailyDurations[dayName] += duration
+		}
+	}
+
+	// Format output
+	weekDisplay := fmt.Sprintf("%s - %s", weekStart.Format("Jan 02"), weekEnd.Format("Jan 02, 2006"))
+	result := fmt.Sprintf("Weekly Summary (%s):\n\n", weekDisplay)
+	result += fmt.Sprintf("Total: %s\n\n", formatDuration(totalDuration))
+
+	// By project
+	if len(projectDurations) > 0 {
+		result += "By Project:\n"
+		for projectID, duration := range projectDurations {
+			projectName := projectNames[projectID]
+			if projectName == "" {
+				projectName = projectID
+			}
+
+			percentage := 0.0
+			if totalDuration > 0 {
+				percentage = (float64(duration) / float64(totalDuration)) * 100
+			}
+
+			result += fmt.Sprintf("- %s: %s (%.1f%%)\n", projectName, formatDuration(duration), percentage)
+		}
+	}
+
+	// Daily breakdown
+	result += "\nDaily Breakdown:\n"
+	weekdays := []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+	for _, day := range weekdays {
+		duration := dailyDurations[day]
+		result += fmt.Sprintf("- %s: %s\n", day, formatDuration(duration))
+	}
+
+	return mcp.NewToolResultText(result), nil
+}
+
+// parseDuration parses an ISO 8601 duration string (e.g., "PT1H30M45S") into time.Duration.
+// Returns 0 for empty or invalid durations (e.g., running timers).
+func parseDuration(isoDuration string) time.Duration {
+	if isoDuration == "" {
+		return 0
+	}
+
+	// Parse ISO 8601 duration format: PT1H30M45S
+	// Pattern: PT([0-9]+H)?([0-9]+M)?([0-9]+S)?
+	re := regexp.MustCompile(`^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$`)
+	matches := re.FindStringSubmatch(isoDuration)
+
+	if matches == nil {
+		return 0
+	}
+
+	var duration time.Duration
+
+	// Hours
+	if matches[1] != "" {
+		hours, _ := strconv.Atoi(matches[1])
+		duration += time.Duration(hours) * time.Hour
+	}
+
+	// Minutes
+	if matches[2] != "" {
+		minutes, _ := strconv.Atoi(matches[2])
+		duration += time.Duration(minutes) * time.Minute
+	}
+
+	// Seconds (can be decimal)
+	if matches[3] != "" {
+		seconds, _ := strconv.ParseFloat(matches[3], 64)
+		duration += time.Duration(seconds * float64(time.Second))
+	}
+
+	return duration
+}
+
+// getWeekBounds calculates the start and end times for a week given an offset.
+// offset=0 is current week, offset=-1 is last week, etc.
+// Week starts on Monday 00:00:00 and ends on Sunday 23:59:59.
+func getWeekBounds(offset int) (start, end time.Time) {
+	now := time.Now().UTC()
+
+	// Find Monday of the current week
+	weekday := int(now.Weekday())
+	if weekday == 0 { // Sunday
+		weekday = 7
+	}
+	daysFromMonday := weekday - 1
+
+	// Calculate Monday of target week
+	monday := now.AddDate(0, 0, -daysFromMonday+(offset*7))
+	start = time.Date(monday.Year(), monday.Month(), monday.Day(), 0, 0, 0, 0, time.UTC)
+
+	// Calculate Sunday of target week
+	sunday := start.AddDate(0, 0, 6)
+	end = time.Date(sunday.Year(), sunday.Month(), sunday.Day(), 23, 59, 59, 999999999, time.UTC)
+
+	return start, end
+}
+
+// formatDuration formats a duration as "Xh Ym" (e.g., "2h 30m").
+// If duration is 0, returns "0h 0m".
+func formatDuration(d time.Duration) string {
+	if d == 0 {
+		return "0h 0m"
+	}
+
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+
+	return fmt.Sprintf("%dh %dm", hours, minutes)
 }

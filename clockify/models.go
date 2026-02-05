@@ -52,3 +52,13 @@ type StartTimerRequest struct {
 	TagIDs      []string `json:"tagIds,omitempty"`
 	Billable    bool     `json:"billable,omitempty"`
 }
+
+// CreateTimeEntryRequest represents the request body for creating a completed time entry.
+type CreateTimeEntryRequest struct {
+	Start       string   `json:"start"`
+	End         string   `json:"end"`
+	Description string   `json:"description,omitempty"`
+	ProjectID   string   `json:"projectId,omitempty"`
+	TagIDs      []string `json:"tagIds,omitempty"`
+	Billable    bool     `json:"billable,omitempty"`
+}

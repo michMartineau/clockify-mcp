@@ -226,3 +226,43 @@ func (c *Client) StopTimer(ctx context.Context, workspaceID, userID string, endT
 	}
 	return &entry, nil
 }
+
+// Delete performs a DELETE request to the given path.
+// Returns nil on success (expects 204 No Content).
+func (c *Client) Delete(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, baseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("X-Api-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// CreateTimeEntry creates a completed time entry with both start and end times.
+func (c *Client) CreateTimeEntry(ctx context.Context, workspaceID string, req CreateTimeEntryRequest) (*TimeEntry, error) {
+	var entry TimeEntry
+	path := fmt.Sprintf("/workspaces/%s/time-entries", workspaceID)
+	if err := c.Post(ctx, path, req, &entry); err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
+// DeleteTimeEntry deletes a time entry by ID.
+func (c *Client) DeleteTimeEntry(ctx context.Context, workspaceID, entryID string) error {
+	path := fmt.Sprintf("/workspaces/%s/time-entries/%s", workspaceID, entryID)
+	return c.Delete(ctx, path)
+}
